@@ -10,10 +10,11 @@ const mongoose = require('mongoose');
  */
 
 const updateSchema = new mongoose.Schema({
-  stage: {
+    stage: {
     type: String,
     required: true,
-    enum: ['farmer', 'Mandi', 'Transport', 'Retailer']
+    enum: ['farmer', 'mandi', 'transport', 'retailer'],
+    lowercase: true
   },
   actor: {
     type: String,
@@ -122,9 +123,10 @@ const batchSchema = new mongoose.Schema({
     type: String,
     required: true,
     enum: {
-      values: ['farmer', 'Mandi', 'Transport', 'Retailer'],
-      message: 'Invalid stage. Must be one of: farmer, Mandi, Transport, Retailer'
+      values: ['farmer', 'mandi', 'transport', 'retailer'],
+      message: 'Invalid stage. Must be one of: farmer, mandi, transport, retailer'
     },
+    lowercase: true,
     default: 'farmer'
   },
   isRecalled: {
