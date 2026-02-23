@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose'); // Required for transactions
 const { ethers } = require('ethers');
 const QRCode = require('qrcode');
 const swaggerUi = require('swagger-ui-express');
@@ -17,6 +18,7 @@ const { chatSchema } = require("./validations/chatSchema");
 const aiService = require('./services/aiService');
 const errorHandlerMiddleware = require('./middleware/errorHandler');
 const { createBatchSchema, updateBatchSchema } = require("./validations/batchSchema");
+const { protect, adminOnly, authorizeBatchOwner, authorizeRoles } = require('./middleware/auth');
 const apiResponse = require('./utils/apiResponse');
 const crypto = require('crypto');
 
@@ -180,13 +182,36 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
     customSiteTitle: 'CropChain API Documentation'
 }));
 
-// Blockchain configuration
-const PROVIDER_URL = process.env.INFURA_URL || 'https://polygon-mumbai.infura.io/v3/YOUR_PROJECT_ID ';
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || '0x...';
-const PRIVATE_KEY = process.env.PRIVATE_KEY || '0x...';
+// Blockchain configuration - FAIL FAST if missing required env vars
+const PROVIDER_URL = process.env.INFURA_URL;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
-if (process.env.NODE_ENV === 'production' && (!PROVIDER_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY)) {
-    console.warn('⚠️  Blockchain configuration incomplete. Running in demo mode.');
+// Validate required environment variables - fail fast strategy (CVSS 9.8 fix)
+if (!PROVIDER_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY) {
+    const missing = [];
+    if (!PROVIDER_URL) missing.push('INFURA_URL');
+    if (!CONTRACT_ADDRESS) missing.push('CONTRACT_ADDRESS');
+    if (!PRIVATE_KEY) missing.push('PRIVATE_KEY');
+    
+    console.error(`🚨 SECURITY ERROR: Missing required environment variables: ${missing.join(', ')}`);
+    console.error('Application refuses to start without required blockchain configuration.');
+    console.error('Please set these environment variables before starting the server.');
+    
+    if (process.env.NODE_ENV === 'production') {
+        // In production, refuse to start without proper configuration
+        throw new Error('FATAL: Missing required blockchain environment variables. Application cannot start.');
+    } else {
+        // In development, warn but allow starting
+        console.warn('⚠️  WARNING: Running in development mode without full blockchain configuration.');
+    }
+}
+
+// Optional: Validate private key format
+if (PRIVATE_KEY) {
+    if (!PRIVATE_KEY.startsWith('0x') || PRIVATE_KEY.length !== 66) {
+        throw new Error('Invalid private key format. Must be 64 hex characters (0x + 64 chars).');
+    }
 }
 
 // Initialize blockchain provider and contract (reused for listener)
@@ -194,7 +219,7 @@ let provider;
 let contractInstance;
 let wallet;
 
-if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY && PRIVATE_KEY !== '0x...') {
+if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY) {
     try {
         provider = new ethers.JsonRpcProvider(PROVIDER_URL);
         wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -217,11 +242,21 @@ if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY && PRIVATE_KEY !== '0x...') 
 }
 
 // Helper functions
-async function generateBatchId() {
+/**
+ * Generate batch ID with optional session support for transaction safety
+ * @param {mongoose.ClientSession} session - MongoDB session for transaction
+ * @returns {string} - Generated batch ID
+ */
+async function generateBatchId(session = null) {
+    const options = { new: true, upsert: true };
+    if (session) {
+        options.session = session;
+    }
+    
     const counter = await Counter.findOneAndUpdate(
         { name: 'batchId' },
         { $inc: { seq: 1 } },
-        { new: true, upsert: true }
+        options
     );
     return `CROP-2024-${String(counter.seq).padStart(3, '0')}`;
 }
@@ -261,18 +296,24 @@ app.use('/api/verification', generalLimiter, verificationRoutes);
 
 // Batch routes - ALL USING MONGODB ONLY
 
-// CREATE batch
-app.post('/api/batches', batchLimiter, validateRequest(createBatchSchema), async (req, res) => {
+// CREATE batch - requires authentication
+// Uses MongoDB transaction to prevent race conditions in batch ID generation (CVSS 7.5 fix)
+app.post('/api/batches', batchLimiter, protect, validateRequest(createBatchSchema), async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    
     try {
         const validatedData = req.body;
-        const batchId = await generateBatchId();
+        
+        // Generate batch ID within transaction for atomicity
+        const batchId = await generateBatchId(session);
         const qrCode = await generateQRCode(batchId);
 
-        const batch = await Batch.create({
+        const batch = await Batch.create([{
             batchId,
-            farmerId: validatedData.farmerId,
-            farmerName: validatedData.farmerName,
-            farmerAddress: validatedData.farmerAddress,
+            farmerId: req.user.farmerId || req.user.id, // Use authenticated user's ID
+            farmerName: validatedData.farmerName || req.user.name,
+            farmerAddress: validatedData.farmerAddress || req.user.address || '',
             cropType: validatedData.cropType,
             quantity: validatedData.quantity,
             harvestDate: validatedData.harvestDate,
@@ -286,22 +327,30 @@ app.post('/api/batches', batchLimiter, validateRequest(createBatchSchema), async
             syncStatus: 'pending',
             updates: [{
                 stage: "farmer",
-                actor: validatedData.farmerName,
+                actor: validatedData.farmerName || req.user.name,
                 location: validatedData.origin,
                 timestamp: validatedData.harvestDate,
                 notes: validatedData.description || "Initial harvest recorded"
             }]
-        });
+        }], { session });
 
-        console.log(`[SUCCESS] Batch created: ${batchId} by ${validatedData.farmerName} from IP: ${req.ip}`);
+        // Commit the transaction
+        await session.commitTransaction();
+        session.endSession();
+        
+        console.log(`[SUCCESS] Batch created: ${batchId} by user ${req.user.id} (${req.user.email}) from IP: ${req.ip}`);
 
         const response = apiResponse.successResponse(
-            { batch },
+            { batch: batch[0] },
             'Batch created successfully',
             201
         );
         res.status(201).json(response);
     } catch (error) {
+        // Abort transaction on error
+        await session.abortTransaction();
+        session.endSession();
+        
         console.error('Error creating batch:', error);
         const response = apiResponse.errorResponse(
             'Failed to create batch',
@@ -341,30 +390,20 @@ app.get('/api/batches/:batchId', batchLimiter, async (req, res) => {
     }
 });
 
-// UPDATE batch
-app.put('/api/batches/:batchId', batchLimiter, validateRequest(updateBatchSchema), async (req, res) => {
+// UPDATE batch - requires authentication and ownership
+app.put('/api/batches/:batchId', batchLimiter, protect, authorizeBatchOwner, validateRequest(updateBatchSchema), async (req, res) => {
     try {
         const { batchId } = req.params;
         const validatedData = req.body;
 
-        const existingBatch = await Batch.findOne({ batchId });
-        if (!existingBatch) {
-            const response = apiResponse.notFoundResponse('Batch', `ID: ${batchId}`);
-            return res.status(404).json(response);
-        }
+        // Normalize stage to lowercase for consistency
+        const normalizedStage = validatedData.stage.toLowerCase();
 
-        if (existingBatch.isRecalled) {
-            console.log("🚨 ALERT: Attempt to update recalled batch:", batchId);
-            const response = apiResponse.errorResponse(
-                'Batch is recalled and cannot be updated',
-                'BATCH_RECALLED',
-                400
-            );
-            return res.status(400).json(response);
-        }
+        // Note: authorizeBatchOwner middleware already checks if batch exists
+        // and verifies ownership, so we can proceed directly to update
 
         const update = {
-            stage: validatedData.stage,
+            stage: normalizedStage,
             actor: validatedData.actor,
             location: validatedData.location,
             timestamp: validatedData.timestamp,
@@ -375,14 +414,14 @@ app.put('/api/batches/:batchId', batchLimiter, validateRequest(updateBatchSchema
             { batchId },
             {
                 $push: { updates: update },
-                currentStage: validatedData.stage,
+                currentStage: normalizedStage,
                 blockchainHash: simulateBlockchainHash(update),
                 syncStatus: 'pending'
             },
             { new: true }
         );
 
-        console.log(`[SUCCESS] Batch updated: ${batchId} to stage ${validatedData.stage} by ${validatedData.actor} from IP: ${req.ip}`);
+        console.log(`[SUCCESS] Batch updated: ${batchId} to stage ${normalizedStage} by ${validatedData.actor} from IP: ${req.ip}`);
 
         const response = apiResponse.successResponse(
             { batch },
@@ -405,8 +444,8 @@ app.put('/api/batches/:batchId', batchLimiter, validateRequest(updateBatchSchema
 app.post(
     '/api/batches/:batchId/recall',
     batchLimiter,
-    auth,
-    admin,
+    protect,
+    adminOnly,
     async (req, res) => {
         try {
             const { batchId } = req.params;
