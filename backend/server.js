@@ -19,6 +19,7 @@ const errorHandlerMiddleware = require('./middleware/errorHandler');
 const { createBatchSchema, updateBatchSchema } = require("./validations/batchSchema");
 const apiResponse = require('./utils/apiResponse');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 
 // Import MongoDB Model
 const Batch = require('./models/Batch');
@@ -181,20 +182,34 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 }));
 
 // Blockchain configuration
-const PROVIDER_URL = process.env.INFURA_URL || 'https://polygon-mumbai.infura.io/v3/YOUR_PROJECT_ID ';
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || '0x...';
-const PRIVATE_KEY = process.env.PRIVATE_KEY || '0x...';
+const REQUIRED_ENV_VARS = [
+    'INFURA_URL',
+    'CONTRACT_ADDRESS',
+    'PRIVATE_KEY'
+];
 
-if (process.env.NODE_ENV === 'production' && (!PROVIDER_URL || !CONTRACT_ADDRESS || !PRIVATE_KEY)) {
-    console.warn('⚠️  Blockchain configuration incomplete. Running in demo mode.');
+if (process.env.NODE_ENV !== 'test') {
+    REQUIRED_ENV_VARS.forEach((key) => {
+        if (!process.env[key]) {
+            throw new Error(`Missing required environment variable: ${key}`);
+        }
+    });
+
+    if (!/^0x[a-fA-F0-9]{64}$/.test(process.env.PRIVATE_KEY)) {
+        throw new Error('Invalid PRIVATE_KEY format');
+    }
 }
+
+const PROVIDER_URL = process.env.INFURA_URL;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
 // Initialize blockchain provider and contract (reused for listener)
 let provider;
 let contractInstance;
 let wallet;
 
-if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY && PRIVATE_KEY !== '0x...') {
+if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY) {
     try {
         provider = new ethers.JsonRpcProvider(PROVIDER_URL);
         wallet = new ethers.Wallet(PRIVATE_KEY, provider);
@@ -218,12 +233,28 @@ if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY && PRIVATE_KEY !== '0x...') 
 
 // Helper functions
 async function generateBatchId() {
-    const counter = await Counter.findOneAndUpdate(
-        { name: 'batchId' },
-        { $inc: { seq: 1 } },
-        { new: true, upsert: true }
-    );
-    return `CROP-2024-${String(counter.seq).padStart(3, '0')}`;
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const counter = await Counter.findOneAndUpdate(
+            { name: 'batchId' },
+            { $inc: { seq: 1 } },
+            { new: true, upsert: true, session }
+        );
+
+        const batchId = `CROP-2024-${String(counter.seq).padStart(3, '0')}`;
+
+        await session.commitTransaction();
+        session.endSession();
+
+        return batchId;
+
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        throw error;
+    }
 }
 
 async function generateQRCode(batchId) {
@@ -265,35 +296,45 @@ app.use('/api/verification', generalLimiter, verificationRoutes);
 app.post('/api/batches', batchLimiter, validateRequest(createBatchSchema), async (req, res) => {
     try {
         const validatedData = req.body;
-        const batchId = await generateBatchId();
-        const qrCode = await generateQRCode(batchId);
+        let batch;
 
-        const batch = await Batch.create({
-            batchId,
-            farmerId: validatedData.farmerId,
-            farmerName: validatedData.farmerName,
-            farmerAddress: validatedData.farmerAddress,
-            cropType: validatedData.cropType,
-            quantity: validatedData.quantity,
-            harvestDate: validatedData.harvestDate,
-            origin: validatedData.origin,
-            certifications: validatedData.certifications,
-            description: validatedData.description,
-            currentStage: "farmer",
-            isRecalled: false,
-            qrCode,
-            blockchainHash: simulateBlockchainHash(validatedData),
-            syncStatus: 'pending',
-            updates: [{
-                stage: "farmer",
-                actor: validatedData.farmerName,
-                location: validatedData.origin,
-                timestamp: validatedData.harvestDate,
-                notes: validatedData.description || "Initial harvest recorded"
-            }]
-        });
+        for (let i = 0; i < 3; i++) {
+            try {
+                const batchId = await generateBatchId();
+                const qrCode = await generateQRCode(batchId);
 
-        console.log(`[SUCCESS] Batch created: ${batchId} by ${validatedData.farmerName} from IP: ${req.ip}`);
+                batch = await Batch.create({
+                    batchId,
+                    farmerId: validatedData.farmerId,
+                    farmerName: validatedData.farmerName,
+                    farmerAddress: validatedData.farmerAddress,
+                    cropType: validatedData.cropType,
+                    quantity: validatedData.quantity,
+                    harvestDate: validatedData.harvestDate,
+                    origin: validatedData.origin,
+                    certifications: validatedData.certifications,
+                    description: validatedData.description,
+                    currentStage: "farmer",
+                    isRecalled: false,
+                    qrCode,
+                    blockchainHash: simulateBlockchainHash(validatedData),
+                    syncStatus: 'pending',
+                    updates: [{
+                        stage: "farmer",
+                        actor: validatedData.farmerName,
+                        location: validatedData.origin,
+                        timestamp: validatedData.harvestDate,
+                        notes: validatedData.description || "Initial harvest recorded"
+                    }]
+                });
+                break;
+            } catch (err) {
+                if (err.code === 11000 && i < 2) continue;
+                throw err;
+            }
+        }
+
+        console.log(`[SUCCESS] Batch created: ${batch.batchId} by ${validatedData.farmerName} from IP: ${req.ip}`);
 
         const response = apiResponse.successResponse(
             { batch },

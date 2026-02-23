@@ -46,6 +46,12 @@ jest.mock('mongoose', () => {
       };
     }),
     connect: jest.fn(),
+    startSession: jest.fn().mockReturnValue({
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      abortTransaction: jest.fn(),
+      endSession: jest.fn()
+    }),
     connection: {
       host: 'localhost',
       readyState: 1, // Simulate connected

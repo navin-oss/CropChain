@@ -46,6 +46,12 @@ jest.mock('mongoose', () => {
       };
     }),
     connect: jest.fn(),
+    startSession: jest.fn().mockReturnValue({
+      startTransaction: jest.fn(),
+      commitTransaction: jest.fn(),
+      abortTransaction: jest.fn(),
+      endSession: jest.fn()
+    }),
     connection: {
       host: 'localhost'
     }
@@ -113,7 +119,7 @@ describe('Issue #100 Fixes', () => {
       expect(mockCounter.findOneAndUpdate).toHaveBeenCalledWith(
         { name: 'batchId' },
         { $inc: { seq: 1 } },
-        { new: true, upsert: true }
+        expect.objectContaining({ new: true, upsert: true, session: expect.anything() })
       );
 
       // Verify batch IDs generated in the mocked create calls
@@ -153,6 +159,40 @@ describe('Issue #100 Fixes', () => {
 
       // SHA-256 hash is 64 hex characters. '0x' prefix makes it 66.
       expect(createCall.blockchainHash).toMatch(/^0x[a-f0-9]{64}$/);
+    });
+  });
+
+  describe('Duplicate Key Retry Fix', () => {
+    it('should retry batch creation on duplicate key error', async () => {
+      mockCounter.findOneAndUpdate.mockResolvedValue({ seq: 100 });
+
+      // First call throws duplicate key error
+      mockBatch.create.mockRejectedValueOnce({ code: 11000 });
+      // Second call succeeds
+      mockBatch.create.mockResolvedValueOnce({
+          batchId: 'CROP-2024-100',
+          // ...
+      });
+
+      const createBatchData = {
+        farmerId: 'farmer123',
+        farmerName: 'John Doe',
+        farmerAddress: '123 Farm Lane, Village',
+        cropType: 'rice',
+        quantity: 100,
+        harvestDate: new Date().toISOString(),
+        origin: 'Farm Location A',
+        certifications: 'Organic',
+        description: 'First harvest of the season'
+      };
+
+      const res = await request(app).post('/api/batches').send(createBatchData);
+
+      expect(res.status).toBe(201);
+      // Expect create to have been called twice (1 failure + 1 success)
+      expect(mockBatch.create).toHaveBeenCalledTimes(2);
+      // Expect generateBatchId (via Counter update) to have been called twice as well
+      expect(mockCounter.findOneAndUpdate).toHaveBeenCalledTimes(2);
     });
   });
 });

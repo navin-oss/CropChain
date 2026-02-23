@@ -156,7 +156,7 @@ const batchSchema = new mongoose.Schema({
 });
 
 // Add indexes for performance optimization
-batchSchema.index({ batchId: 1 });
+batchSchema.index({ batchId: 1 }, { unique: true });
 batchSchema.index({ farmerId: 1 });
 batchSchema.index({ createdAt: -1 });
 batchSchema.index({ currentStage: 1 });
