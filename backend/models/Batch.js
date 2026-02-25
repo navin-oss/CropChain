@@ -11,7 +11,7 @@ const STAGES = require('../constants/stages');
  */
 
 const updateSchema = new mongoose.Schema({
-  stage: {
+    stage: {
     type: String,
     required: true,
     enum: STAGES,
