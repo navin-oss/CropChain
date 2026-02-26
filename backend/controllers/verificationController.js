@@ -42,7 +42,9 @@ const linkWallet = async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        res.status(500).json(
+        console.error('Wallet linking failed:', error);
+
+        return res.status(500).json(
             apiResponse.errorResponse('Wallet linking failed', 'WALLET_LINKING_ERROR', 500)
         );
     }
@@ -70,8 +72,14 @@ const issueCredential = async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        res.status(400).json(
-            apiResponse.errorResponse('Credential issuance failed', 'CREDENTIAL_ISSUANCE_ERROR', 400)
+        console.error('Credential issuing failed:', error);
+
+        return res.status(500).json(
+            apiResponse.errorResponse(
+                'Credential issuing failed',
+                'CREDENTIAL_ISSUE_ERROR',
+                500
+            )
         );
     }
 };
@@ -98,8 +106,14 @@ const revokeCredential = async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        res.status(400).json(
-            apiResponse.errorResponse('Credential revocation failed', 'CREDENTIAL_REVOCATION_ERROR', 400)
+        console.error('Credential revocation failed:', error);
+
+        return res.status(500).json(
+            apiResponse.errorResponse(
+                'Credential revocation failed',
+                'CREDENTIAL_REVOKE_ERROR',
+                500
+            )
         );
     }
 };
