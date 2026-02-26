@@ -6,7 +6,7 @@ export interface User {
     id: string;
     name: string;
     email: string;
-    role: 'farmer' | 'transporter' | 'admin';
+    role: 'farmer' | 'transporter' | 'admin' | '';
     walletAddress?: string;
     verification?: {
         isVerified: boolean;
@@ -27,10 +27,33 @@ export interface RegisterCredentials {
     role: 'farmer' | 'transporter' | 'admin';
 }
 
+export interface WalletLoginCredentials {
+    address: string;
+    signature: string;
+    nonce?: string;
+}
+
+export interface WalletRegisterCredentials {
+    name: string;
+    email: string;
+    walletAddress: string;
+    signature: string;
+    nonce?: string;
+    role: 'farmer' | 'transporter';
+}
+
 interface AuthResponse {
     success: boolean;
     token: string;
     user: User;
+    message: string;
+}
+
+interface NonceResponse {
+    success: boolean;
+    data: {
+        nonce: string;
+    };
     message: string;
 }
 
@@ -42,6 +65,39 @@ export const authService = {
 
     async register(credentials: RegisterCredentials): Promise<AuthResponse> {
         const response = await axios.post<{ data: AuthResponse }>(`${API_URL}/auth/register`, credentials);
+        return response.data.data;
+    },
+
+    /**
+     * Get a nonce for wallet authentication
+     * This should be called before signing the message
+     */
+    async getNonce(address: string): Promise<string> {
+        const response = await axios.get<NonceResponse>(`${API_URL}/auth/nonce`, {
+            params: { address }
+        });
+        return response.data.data.nonce;
+    },
+
+    /**
+     * Authenticate with wallet signature
+     * Flow:
+     * 1. Get nonce from backend
+     * 2. User signs nonce with wallet
+     * 3. Send address and signature to backend
+     * 4. Backend verifies signature and returns JWT with user role
+     */
+    async walletLogin(credentials: WalletLoginCredentials): Promise<AuthResponse> {
+        const response = await axios.post<{ data: AuthResponse }>(`${API_URL}/auth/wallet-login`, credentials);
+        return response.data.data;
+    },
+
+    /**
+     * Register a new wallet user
+     * Similar to wallet login but creates a new user
+     */
+    async walletRegister(credentials: WalletRegisterCredentials): Promise<AuthResponse> {
+        const response = await axios.post<{ data: AuthResponse }>(`${API_URL}/auth/wallet-register`, credentials);
         return response.data.data;
     },
 
@@ -60,5 +116,9 @@ export const authService = {
             }
         }
         return null;
+    },
+
+    getToken(): string | null {
+        return localStorage.getItem('token');
     }
 };

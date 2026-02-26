@@ -1,4 +1,5 @@
 const Joi = require("joi");
+const STAGES = require("../constants/stages");
 
 const createBatchSchema = Joi.object({
   farmerId: Joi.string().alphanum().min(5).max(50).required(),
@@ -32,11 +33,11 @@ const updateBatchSchema = Joi.object({
   batchId: Joi.string().optional(),
 
   stage: Joi.string()
-    .lowercase()
-    .valid("farmer", "mandi", "transport", "retailer")
+    .valid(...STAGES)
     .required()
+    .lowercase() // Normalize to lowercase before validation
     .messages({
-      "any.only": "Stage must be one of: farmer, mandi, transport, or retailer",
+      "any.only": `Stage must be one of: ${STAGES.join(', ')}`,
     }),
 
   actor: Joi.string().min(2).max(100).required(),
