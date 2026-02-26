@@ -261,7 +261,7 @@ async function generateBatchId() {
             { new: true, upsert: true, session }
         );
 
-        const batchId = `CROP-2024-${String(counter.seq).padStart(3, '0')}`;
+        const batchId = `CROP-${new Date().getFullYear()}-${String(counter.seq).padStart(4, '0')}`;
 
         await session.commitTransaction();
         session.endSession();
@@ -314,43 +314,36 @@ app.use('/api/verification', generalLimiter, verificationRoutes);
 app.post('/api/batches', batchLimiter, validateRequest(createBatchSchema), async (req, res) => {
     try {
         const validatedData = req.body;
-        let batch;
 
-        for (let i = 0; i < 3; i++) {
-            try {
-                const batchId = await generateBatchId();
-                const qrCode = await generateQRCode(batchId);
+        // Atomic batch ID generation - no retry needed
+        // The Counter model uses findOneAndUpdate with $inc which is atomic
+        const batchId = await generateBatchId();
+        const qrCode = await generateQRCode(batchId);
 
-                batch = await Batch.create({
-                    batchId,
-                    farmerId: validatedData.farmerId,
-                    farmerName: validatedData.farmerName,
-                    farmerAddress: validatedData.farmerAddress,
-                    cropType: validatedData.cropType,
-                    quantity: validatedData.quantity,
-                    harvestDate: validatedData.harvestDate,
-                    origin: validatedData.origin,
-                    certifications: validatedData.certifications,
-                    description: validatedData.description,
-                    currentStage: "farmer",
-                    isRecalled: false,
-                    qrCode,
-                    blockchainHash: simulateBlockchainHash(validatedData),
-                    syncStatus: 'pending',
-                    updates: [{
-                        stage: "farmer",
-                        actor: validatedData.farmerName,
-                        location: validatedData.origin,
-                        timestamp: validatedData.harvestDate,
-                        notes: validatedData.description || "Initial harvest recorded"
-                    }]
-                });
-                break;
-            } catch (err) {
-                if (err.code === 11000 && i < 2) continue;
-                throw err;
-            }
-        }
+        const batch = await Batch.create({
+            batchId,
+            farmerId: validatedData.farmerId,
+            farmerName: validatedData.farmerName,
+            farmerAddress: validatedData.farmerAddress,
+            cropType: validatedData.cropType,
+            quantity: validatedData.quantity,
+            harvestDate: validatedData.harvestDate,
+            origin: validatedData.origin,
+            certifications: validatedData.certifications,
+            description: validatedData.description,
+            currentStage: "farmer",
+            isRecalled: false,
+            qrCode,
+            blockchainHash: simulateBlockchainHash(validatedData),
+            syncStatus: 'pending',
+            updates: [{
+                stage: "farmer",
+                actor: validatedData.farmerName,
+                location: validatedData.origin,
+                timestamp: validatedData.harvestDate,
+                notes: validatedData.description || "Initial harvest recorded"
+            }]
+        });
 
         console.log(`[SUCCESS] Batch created: ${batch.batchId} by ${validatedData.farmerName} from IP: ${req.ip}`);
 
