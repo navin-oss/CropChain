@@ -32,7 +32,8 @@ const updateBatchSchema = Joi.object({
   batchId: Joi.string().optional(),
 
   stage: Joi.string()
-    .valid("farmer", "mandi", "transport", "retailer", "Farmer", "Mandi", "Transport", "Retailer")
+    .lowercase()
+    .valid("farmer", "mandi", "transport", "retailer")
     .required()
     .messages({
       "any.only": "Stage must be one of: farmer, mandi, transport, or retailer",
