@@ -21,11 +21,35 @@ const { createBatchSchema, updateBatchSchema } = require("./validations/batchSch
 const { protect, adminOnly, authorizeBatchOwner, authorizeRoles } = require('./middleware/auth');
 const apiResponse = require('./utils/apiResponse');
 const crypto = require('crypto');
-const mongoose = require('mongoose');
 
 // Import MongoDB Model
 const Batch = require('./models/Batch');
 const Counter = require('./models/Counter');
+
+// ==================== GLOBAL EXCEPTION HANDLERS ====================
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('🔥 UNHANDLED REJECTION:', reason);
+    console.error('Promise:', promise);
+    // Log to external service in production
+    if (process.env.NODE_ENV === 'production') {
+        // In production, you might want to send to a logging service
+        // sendToLoggingService({ type: 'unhandledRejection', reason, promise });
+    }
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('🔥 UNCAUGHT EXCEPTION:', error);
+    // Log to external service in production
+    if (process.env.NODE_ENV === 'production') {
+        // In production, you might want to send to a logging service
+        // sendToLoggingService({ type: 'uncaughtException', error });
+    }
+    // Exit with non-zero code to indicate failure
+    process.exit(1);
+});
 
 // Connect to Database
 connectDB();
@@ -252,29 +276,6 @@ if (PROVIDER_URL && CONTRACT_ADDRESS && PRIVATE_KEY) {
 }
 
 // Helper functions
-async function generateBatchId() {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    try {
-        const counter = await Counter.findOneAndUpdate(
-            { name: 'batchId' },
-            { $inc: { seq: 1 } },
-            { new: true, upsert: true, session }
-        );
-
-        const currentYear = new Date().getFullYear();
-        const batchId = `CROP-${currentYear}-${String(counter.seq).padStart(3, '0')}`;
-
-        await session.commitTransaction();
-        session.endSession();
-
-        return batchId;
-
-    } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
-        throw error;
 /**
  * Generate batch ID with optional session support for transaction safety
  * @param {mongoose.ClientSession} session - MongoDB session for transaction
@@ -291,7 +292,9 @@ async function generateBatchId(session = null) {
         { $inc: { seq: 1 } },
         options
     );
-    return `CROP-2024-${String(counter.seq).padStart(3, '0')}`;
+    
+    const currentYear = new Date().getFullYear();
+    return `CROP-${currentYear}-${String(counter.seq).padStart(3, '0')}`;
 }
 
 async function generateQRCode(batchId) {
@@ -332,10 +335,11 @@ app.use('/api/verification', generalLimiter, verificationRoutes);
 // CREATE batch - requires authentication
 // Uses MongoDB transaction to prevent race conditions in batch ID generation (CVSS 7.5 fix)
 app.post('/api/batches', batchLimiter, protect, validateRequest(createBatchSchema), async (req, res) => {
-    const session = await mongoose.startSession();
-    session.startTransaction();
-    
+    let session;
     try {
+        session = await mongoose.startSession();
+        session.startTransaction();
+        
         const validatedData = req.body;
         
         // Generate batch ID within transaction for atomicity
@@ -367,9 +371,23 @@ app.post('/api/batches', batchLimiter, protect, validateRequest(createBatchSchem
             }]
         }], { session });
 
-        // Commit the transaction
-        await session.commitTransaction();
-        session.endSession();
+        // Commit the transaction with try/catch
+        try {
+            if (session) {
+                await session.commitTransaction();
+            }
+        } catch (commitError) {
+            console.error('Error committing transaction:', commitError);
+        }
+        
+        // End session with try/catch
+        try {
+            if (session) {
+                session.endSession();
+            }
+        } catch (endSessionError) {
+            console.error('Error ending session:', endSessionError);
+        }
         
         console.log(`[SUCCESS] Batch created: ${batchId} by user ${req.user.id} (${req.user.email}) from IP: ${req.ip}`);
 
@@ -380,9 +398,23 @@ app.post('/api/batches', batchLimiter, protect, validateRequest(createBatchSchem
         );
         res.status(201).json(response);
     } catch (error) {
-        // Abort transaction on error
-        await session.abortTransaction();
-        session.endSession();
+        // Abort transaction on error with try/catch
+        try {
+            if (session) {
+                await session.abortTransaction();
+            }
+        } catch (abortError) {
+            console.error('Error aborting transaction:', abortError);
+        }
+        
+        // End session with try/catch
+        try {
+            if (session) {
+                session.endSession();
+            }
+        } catch (endSessionError) {
+            console.error('Error ending session:', endSessionError);
+        }
         
         console.error('Error creating batch:', error);
         const response = apiResponse.errorResponse(
